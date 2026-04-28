@@ -1,0 +1,16 @@
+[project]
+name = "kvasir_segmentation"
+version = "0.0.1"
+description = "A project implementing Medical Image Segmentation using UNet architecture."
+authors = [
+    { name="Aayush Kumar", email="aayushkumarfirst@gmail.com" }
+]
+requires-python = ">=3.10"
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["seg_modules*"]

@@ -1,0 +1,6 @@
+# Ignoring compiled and cache files
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
