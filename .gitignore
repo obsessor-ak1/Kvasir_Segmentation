@@ -4,3 +4,6 @@ __pycache__/
 *.pyo
 .pytest_cache/
 
+# Checkpoint files and logs
+checkpoints/
+wandb/
