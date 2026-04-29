@@ -1,6 +1,7 @@
 """A script to train UNet model for medical image segmentation."""
 
 from argparse import ArgumentParser
+import sys
 
 import torch
 from torch.amp import autocast, GradScaler
@@ -47,8 +48,25 @@ val_transform = v2.Compose(
     [v2.Resize(IMAGE_SIZE, antialias=True), v2.ToDtype(torch.float32, scale=True)]
 )
 
-train_bar = ProgressBar(persist=True, desc="Training")
-val_bar = ProgressBar(persist=True, desc="Validation")
+train_bar = ProgressBar(persist=False, desc="Training")
+val_bar = ProgressBar(persist=False, desc="Validation")
+
+def get_distributed_config():
+    if not torch.cuda.is_available():
+        print("Detected NO GPU. Running in CPU-only mode. 🐢")
+        return None, 1
+    num_gpus = torch.cuda.device_count()    
+    if num_gpus == 1:
+        print(f"Detected 1 GPU: {torch.cuda.get_device_name(0)}. Running in single-process mode. 🚀")
+        return None, None
+        
+    if sys.platform == "win32":
+        print(f"Detected Windows with {num_gpus} GPUs. Forcing 'gloo' backend. 🚀🚀")
+        return "gloo", num_gpus
+        
+    print(f"Detected Linux with {num_gpus} GPUs. Using optimal 'nccl' backend. 🚀🚀")
+    return "nccl", num_gpus
+
 
 
 def get_dataloaders(path, batch_size=BATCH_SIZE, num_workers=NUM_WORKERS):
@@ -88,9 +106,9 @@ class TrainerProcess:
 
         x, y = batch
         x, y = x.to(self.device), y.to(self.device)
-
+        y = (y > 127)
         device_type = self.device.type
-        with autocast(device_type=device_type, enabled=self.use_amp):
+        with autocast(device_type=device_type, enabled=self.use_amp and device_type=="cuda"):
             y_pred = self.model(x)
             loss = self.loss_fn(y_pred.view(y.shape), y.float())
 
@@ -103,9 +121,9 @@ class TrainerProcess:
     @staticmethod
     def binary_output_transform(output):
         y_pred, y = output[1:]
-        y_pred = y_pred.sigmoid().round().long()
+        y_pred = y_pred.squeeze(dim=1).sigmoid().round().long()
         y_pred = utils.to_onehot(y_pred, num_classes=2)
-        y = utils.to_onehot(y, num_classes=2)
+        y = y.squeeze(dim=1).long()
         return y_pred, y
 
 
@@ -119,7 +137,7 @@ class EvaluatorProcess:
 
         x, y = batch
         x, y = x.to(self.device), y.to(self.device)
-
+        y = (y > 127)
         with torch.inference_mode():
             y_pred = self.model(x)
 
@@ -128,9 +146,9 @@ class EvaluatorProcess:
     @staticmethod
     def binary_output_transform(output):
         y_pred, y = output
-        y_pred = y_pred.sigmoid().round().long()
+        y_pred = y_pred.squeeze(dim=1).sigmoid().round().long()
         y_pred = utils.to_onehot(y_pred, num_classes=2)
-        y = utils.to_onehot(y, num_classes=2)
+        y = y.squeeze(dim=1).long()
         return y_pred, y
 
 
@@ -138,21 +156,21 @@ def log_trainer_metrics(trainer_engine):
     train_bar.log_message(f"Train Epoch: {trainer_engine.state.epoch}")
     for name, val in trainer_engine.state.metrics.items():
         if name != "confusion_matrix":
-            train_bar.log_message(f"{name}: {val:.4f}")
+            train_bar.log_message(f"{name}: {val}")
 
 
 def log_evaluator_metrics(validator_engine):
     val_bar.log_message("Validation Metrics:")
     for name, val in validator_engine.state.metrics.items():
         if name != "confusion_matrix":
-            val_bar.log_message(f"{name}: {val:.4f}")
+            val_bar.log_message(f"{name}: {val}")
 
 
 def attach_wandb_logger(trainer, evaluator, config):
     """Attach Weights & Biases logger to the trainer and evaluator."""
     step_source = global_step_from_engine(trainer, Events.EPOCH_COMPLETED)
     logger = WandBLogger(
-        project="RDD_Road_Damage_Detection",
+        project="Kvasir_Segmentation",
         config=config,
     )
     logger.attach(
@@ -160,7 +178,6 @@ def attach_wandb_logger(trainer, evaluator, config):
         log_handler=OutputHandler(
             tag="training",
             metric_names="all",
-            output_transform=lambda _: None,
             global_step_transform=lambda engine, _: engine.state.epoch,
         ),
         event_name=Events.EPOCH_COMPLETED,
@@ -170,7 +187,6 @@ def attach_wandb_logger(trainer, evaluator, config):
         log_handler=OutputHandler(
             tag="validation",
             metric_names="all",
-            output_transform=lambda _: None,
             global_step_transform=step_source,
         ),
         event_name=Events.EPOCH_COMPLETED,
@@ -186,7 +202,7 @@ def start_training(local_rank, config):
     loss_fn = nn.BCEWithLogitsLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=config["learning_rate"])
     optimizer = idist.auto_optim(optimizer)
-    grad_scaler = GradScaler(enabled="cuda" in device and config["use_amp"])
+    grad_scaler = GradScaler(enabled=device.type == "cuda" and config["use_amp"])
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=15, gamma=0.1)
     train_loader, val_loader = get_dataloaders(
         config["data_path"], config["batch_size"], config["num_workers"]
@@ -207,7 +223,7 @@ def start_training(local_rank, config):
         "dice": DiceCoefficient(cm_train),
     }
     val_metrics = {
-        "loss": Loss(loss_fn),
+        "loss": Loss(loss_fn, output_transform=lambda output: (output[0].view(output[1].shape), output[1].float())),
         "accuracy": Accuracy(output_transform=EvaluatorProcess.binary_output_transform),
         "confusion_matrix": cm_val,
         "mIoU": mIoU(cm_val),
@@ -238,9 +254,9 @@ def start_training(local_rank, config):
         Checkpoint.load_objects(to_load=to_track, filename=config["checkpoint_path"])
 
     checkpoint_handler = Checkpoint(
-        to_save=to_track,
+        to_save=to_track, 
         save_handler=DiskSaver("./checkpoints", create_dir=True, require_empty=False),
-        score_function=lambda engine: engine.state.metrics["dice"],
+        score_function=lambda engine: engine.state.metrics["dice"][1].item(),
         score_name="dice",
         n_saved=3,
         global_step_transform=global_step_from_engine(trainer, Events.EPOCH_COMPLETED),
@@ -250,8 +266,7 @@ def start_training(local_rank, config):
     stopping_handler = EarlyStopping(
         mode="max",
         patience=5,
-        score_function=lambda engine: engine.state.metrics["dice"],
-        score_name="dice",
+        score_function=lambda engine: engine.state.metrics["dice"][1].item(),
         trainer=trainer,
     )
     evaluator.add_event_handler(Events.EPOCH_COMPLETED, stopping_handler)
@@ -259,10 +274,10 @@ def start_training(local_rank, config):
         Events.EPOCH_COMPLETED, lambda _: evaluator.run(val_loader)
     )
     if idist.get_rank() == 0:
-        train_bar.attach(trainer, metrics=["loss"])
+        train_bar.attach(trainer, metric_names=["loss"])
         val_bar.attach(evaluator)
         trainer.add_event_handler(
-            Events.EPOCH_COMPLETED, log_trainer_metrics, evaluator, val_loader
+            Events.EPOCH_COMPLETED, log_trainer_metrics
         )
         evaluator.add_event_handler(Events.EPOCH_COMPLETED, log_evaluator_metrics)
         attach_wandb_logger(trainer, evaluator, config)
@@ -296,7 +311,8 @@ def main():
     args = parser.parse_args()
     config = vars(args)
 
-    with idist.Parallel(backend=None) as parallel:
+    backend, nproc = get_distributed_config()
+    with idist.Parallel(backend=backend, nproc_per_node=nproc) as parallel:
         parallel.run(start_training, config)
 
 
