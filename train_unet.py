@@ -30,7 +30,7 @@ from ignite.metrics import (
 )
 
 from seg_modules.data import Kvasir1Dataset
-from seg_modules.unet import UNet
+from seg_modules.unet import UNet, AttentionUNet
 
 IMAGE_SIZE = (256, 256)
 BATCH_SIZE = 16
@@ -43,6 +43,11 @@ train_transform = v2.Compose(
         v2.ToDtype(torch.float32, scale=True),
     ]
 )
+
+model_catalog = {
+    "unet": UNet,
+    "attention_unet": AttentionUNet,
+}
 
 val_transform = v2.Compose(
     [v2.Resize(IMAGE_SIZE, antialias=True), v2.ToDtype(torch.float32, scale=True)]
@@ -67,6 +72,12 @@ def get_distributed_config():
     print(f"Detected Linux with {num_gpus} GPUs. Using optimal 'nccl' backend. 🚀🚀")
     return "nccl", num_gpus
 
+
+def get_model(name="unet", num_classes=1):
+    model = model_catalog.get(name)
+    if model is None:
+        raise ValueError(f"Model {name} not found in catalog.")
+    return model(in_channels=3, num_classes=num_classes)
 
 
 def get_dataloaders(path, batch_size=BATCH_SIZE, num_workers=NUM_WORKERS):
@@ -196,7 +207,7 @@ def attach_wandb_logger(trainer, evaluator, config):
 
 def start_training(local_rank, config):
     device = idist.device()
-    model = UNet(in_channels=3, num_classes=1)
+    model = get_model(config["model_name"], num_classes=1)
     model = idist.auto_model(model)
 
     loss_fn = nn.BCEWithLogitsLoss()
@@ -294,7 +305,9 @@ def main():
     parser.add_argument(
         "learning_rate", type=float, help="Learning rate for the optimizer"
     )
-
+    parser.add_argument(
+        "--model_name", type=str, default="unet", help="Model name to use for training"
+    )
     parser.add_argument(
         "--use_amp", action="store_true", help="Enable Automatic Mixed Precision"
     )
