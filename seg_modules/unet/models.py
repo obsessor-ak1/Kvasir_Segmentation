@@ -43,7 +43,7 @@ class UNet(nn.Module):
 
 class AttentionUNet(nn.Module):
     """The UNet Architecture for Medical Image Segmentation."""
-    def __init__(self, in_channels, attention_channels=16, num_classes=5):
+    def __init__(self, in_channels, num_classes=5):
         super().__init__()
         self.downsample_convs = nn.ModuleList([
             UNetDownsampleConvBlock(in_channels, 64),
@@ -55,13 +55,13 @@ class AttentionUNet(nn.Module):
         self.final_downsample = UNetDownsampleConvBlock(512, 1024)
         self.upsamplers = nn.ModuleList([
             AttentionUnetDecoderBlock(
-                1024, 512, attention_channels, 512, num_maps=num_classes),
+                1024, 512, 64, 512, num_maps=num_classes),
             AttentionUnetDecoderBlock(
-                512, 256, attention_channels, 256, num_maps=num_classes),
+                512, 256, 32, 256, num_maps=num_classes),
             AttentionUnetDecoderBlock(
-                256, 128, attention_channels, 128, num_maps=num_classes),
+                256, 128, 16, 128, num_maps=num_classes),
             AttentionUnetDecoderBlock(
-                128, 64, attention_channels, 64, num_maps=num_classes)
+                128, 64, 18, 64, num_maps=num_classes)
         ])
         self.classifier = nn.Conv2d(64, num_classes, kernel_size=1)
     
