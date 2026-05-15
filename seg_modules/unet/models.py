@@ -55,13 +55,13 @@ class AttentionUNet(nn.Module):
         self.final_downsample = UNetDownsampleConvBlock(512, 1024)
         self.upsamplers = nn.ModuleList([
             AttentionUnetDecoderBlock(
-                1024, 512, 128, 512, num_maps=num_classes),
+                1024, 512, 256, 512, num_maps=num_classes),
             AttentionUnetDecoderBlock(
-                512, 256, 64, 256, num_maps=num_classes),
+                512, 256, 128, 256, num_maps=num_classes),
             AttentionUnetDecoderBlock(
-                256, 128, 32, 128, num_maps=num_classes),
+                256, 128, 64, 128, num_maps=num_classes),
             AttentionUnetDecoderBlock(
-                128, 64, 16, 64, num_maps=num_classes)
+                128, 64, 32, 64, num_maps=num_classes)
         ])
         self.classifier = nn.Conv2d(64, num_classes, kernel_size=1)
     
