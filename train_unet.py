@@ -31,7 +31,7 @@ from ignite.metrics import (
 
 from seg_modules.data import Kvasir1Dataset
 from seg_modules.unet import UNet, AttentionUNet, UNetPlusPlus
-from seg_modules.train_utils import (
+from seg_modules.training import (
     UNetTrainerProcess,
     UNetEvaluatorProcess,
     UNetPlusPlusTrainerProcess,
@@ -118,9 +118,6 @@ def get_dataloaders(path, batch_size=BATCH_SIZE, num_workers=NUM_WORKERS):
     )
 
     return train_loader, val_loader
-
-
-
 
 
 def log_trainer_metrics(trainer_engine):
