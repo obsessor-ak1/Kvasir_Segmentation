@@ -30,7 +30,14 @@ from ignite.metrics import (
 )
 
 from seg_modules.data import Kvasir1Dataset
-from seg_modules.unet import UNet, AttentionUNet
+from seg_modules.unet import UNet, AttentionUNet, UNetPlusPlus
+from seg_modules.train_utils import (
+    UNetTrainerProcess,
+    UNetEvaluatorProcess,
+    UNetPlusPlusTrainerProcess,
+    train_output_transform,
+    val_output_transform,
+)
 
 IMAGE_SIZE = (256, 256)
 BATCH_SIZE = 16
@@ -47,6 +54,19 @@ train_transform = v2.Compose(
 model_catalog = {
     "unet": UNet,
     "attention_unet": AttentionUNet,
+    "unet_plus_plus": UNetPlusPlus,
+}
+
+train_process_catalog = {
+    "unet": UNetTrainerProcess,
+    "attention_unet": UNetTrainerProcess,
+    "unet_plus_plus": UNetPlusPlusTrainerProcess,
+}
+
+eval_process_catalog = {
+    "unet": UNetEvaluatorProcess,
+    "attention_unet": UNetEvaluatorProcess,
+    "unet_plus_plus": UNetEvaluatorProcess,
 }
 
 val_transform = v2.Compose(
@@ -100,67 +120,7 @@ def get_dataloaders(path, batch_size=BATCH_SIZE, num_workers=NUM_WORKERS):
     return train_loader, val_loader
 
 
-class TrainerProcess:
-    def __init__(
-        self, model, optimizer, loss_fn, grad_scaler, device="cuda", use_amp=True
-    ):
-        self.model = model
-        self.optimizer = optimizer
-        self.loss_fn = loss_fn
-        self.grad_scaler = grad_scaler
-        self.device = device
-        self.use_amp = use_amp
 
-    def __call__(self, engine, batch):
-        self.model.train()
-        self.optimizer.zero_grad()
-
-        x, y = batch
-        x, y = x.to(self.device), y.to(self.device)
-        y = (y > 127)
-        device_type = self.device.type
-        with autocast(device_type=device_type, enabled=self.use_amp and device_type=="cuda"):
-            y_pred = self.model(x)
-            loss = self.loss_fn(y_pred.view(y.shape), y.float())
-
-        self.grad_scaler.scale(loss).backward()
-        self.grad_scaler.step(self.optimizer)
-        self.grad_scaler.update()
-
-        return loss.item(), y_pred.detach(), y.detach()
-
-    @staticmethod
-    def binary_output_transform(output):
-        y_pred, y = output[1:]
-        y_pred = y_pred.squeeze(dim=1).sigmoid().round().long()
-        y_pred = utils.to_onehot(y_pred, num_classes=2)
-        y = y.squeeze(dim=1).long()
-        return y_pred, y
-
-
-class EvaluatorProcess:
-    def __init__(self, model, device="cuda"):
-        self.model = model
-        self.device = device
-
-    def __call__(self, engine, batch):
-        self.model.eval()
-
-        x, y = batch
-        x, y = x.to(self.device), y.to(self.device)
-        y = (y > 127)
-        with torch.inference_mode():
-            y_pred = self.model(x)
-
-        return y_pred, y
-
-    @staticmethod
-    def binary_output_transform(output):
-        y_pred, y = output
-        y_pred = y_pred.squeeze(dim=1).sigmoid().round().long()
-        y_pred = utils.to_onehot(y_pred, num_classes=2)
-        y = y.squeeze(dim=1).long()
-        return y_pred, y
 
 
 def log_trainer_metrics(trainer_engine):
@@ -219,32 +179,36 @@ def start_training(local_rank, config):
         config["data_path"], config["batch_size"], config["num_workers"]
     )
 
+    # Select process classes based on model name
+    trainer_class = train_process_catalog[config["model_name"]]
+    evaluator_class = eval_process_catalog[config["model_name"]]
+
     # Creating the metrics
     cm_train = ConfusionMatrix(
-        num_classes=2, output_transform=TrainerProcess.binary_output_transform
+        num_classes=2, output_transform=train_output_transform
     )
     cm_val = ConfusionMatrix(
-        num_classes=2, output_transform=EvaluatorProcess.binary_output_transform
+        num_classes=2, output_transform=val_output_transform
     )
     train_metrics = {
         "loss": RunningAverage(output_transform=lambda output: output[0]),
-        "accuracy": Accuracy(output_transform=TrainerProcess.binary_output_transform),
+        "accuracy": Accuracy(output_transform=train_output_transform),
         "confusion_matrix": cm_train,
         "mIoU": mIoU(cm_train),
         "dice": DiceCoefficient(cm_train),
     }
     val_metrics = {
         "loss": Loss(loss_fn, output_transform=lambda output: (output[0].view(output[1].shape), output[1].float())),
-        "accuracy": Accuracy(output_transform=EvaluatorProcess.binary_output_transform),
+        "accuracy": Accuracy(output_transform=val_output_transform),
         "confusion_matrix": cm_val,
         "mIoU": mIoU(cm_val),
         "dice": DiceCoefficient(cm_val),
     }
     # Preparing the engine
-    train_process = TrainerProcess(
+    train_process = trainer_class(
         model, optimizer, loss_fn, grad_scaler, device, config["use_amp"]
     )
-    val_process = EvaluatorProcess(model, device)
+    val_process = evaluator_class(model, device)
     trainer = Engine(train_process)
     evaluator = Engine(val_process)
     for name, metric in train_metrics.items():

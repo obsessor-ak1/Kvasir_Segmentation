@@ -88,7 +88,7 @@ class UNetUpsampleBlock(nn.Module):
     def __init__(self, in_channels, out_channels):
         super().__init__()
         self.upsample = nn.ConvTranspose2d(
-            in_channels, out_channels, kernel_size=2, stride=2
+            out_channels * 2, out_channels, kernel_size=2, stride=2
         )
         self.conv_block = nn.Sequential(
             nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1),
@@ -104,3 +104,29 @@ class UNetUpsampleBlock(nn.Module):
         concatenated = torch.cat((skip_connection, X), dim=1)
         X = self.conv_block(concatenated)
         return X
+
+
+class UnetPlusPlusSkipNode(nn.Module):
+    """Represents a skip node in UNet Architecture."""
+    def __init__(self, level, skip_id):
+        super().__init__()
+        # The original UNet++ uses 32 but for comparability with 
+        # original UNet, 64 is used here
+        level_channels = 64 * 2 ** level
+        total_in_channels = level_channels * (skip_id + 2)
+        self.conv_block = nn.Sequential(
+            nn.Conv2d(in_channels=total_in_channels, out_channels=level_channels, kernel_size=3, padding=1),
+            nn.BatchNorm2d(level_channels),
+            nn.ReLU()
+        )
+    
+    def forward(self, semantic_map, skip_list):
+
+        semantic_map = nn.functional.interpolate(
+            semantic_map, size=skip_list[0].shape[-2:], mode="bilinear", align_corners=False
+        )
+        if isinstance(skip_list, list):
+            concatenated = torch.cat(skip_list + [semantic_map], dim=1)
+        else:
+            concatenated = torch.cat([skip_list, semantic_map], dim=1)
+        return self.conv_block(concatenated)
