@@ -11,23 +11,25 @@ from seg_modules.unet.layers import (
 
 class UNet(nn.Module):
     """The UNet Architecture for Medical Image Segmentation."""
-    def __init__(self, in_channels, num_classes=5):
+    def __init__(self, in_channels, num_classes=5, depth=5):
+        if depth <= 2:
+            raise ValueError("depth must be greater than 2")
         super().__init__()
-        self.downsample_convs = nn.ModuleList([
-            UNetDownsampleConvBlock(in_channels, 64),
-            UNetDownsampleConvBlock(64, 128),
-            UNetDownsampleConvBlock(128, 256),
-            UNetDownsampleConvBlock(256, 512),
-        ])
+        channels = [64 * (2 ** i) for i in range(depth)]
+        
+        down_convs = [UNetDownsampleConvBlock(in_channels, channels[0])]
+        for i in range(1, depth - 1):
+            down_convs.append(UNetDownsampleConvBlock(channels[i-1], channels[i]))
+        self.downsample_convs = nn.ModuleList(down_convs)
+        
         self.downsampler = nn.MaxPool2d(kernel_size=2, stride=2)
-        self.final_downsample = UNetDownsampleConvBlock(512, 1024)
+        self.final_downsample = UNetDownsampleConvBlock(channels[depth-2], channels[depth-1])
+        
         self.upsamplers = nn.ModuleList([
-            UNetUpsampleBlock(1024, 512),
-            UNetUpsampleBlock(512, 256),
-            UNetUpsampleBlock(256, 128),
-            UNetUpsampleBlock(128, 64)
+            UNetUpsampleBlock(channels[i] * 2, channels[i])
+            for i in reversed(range(depth - 1))
         ])
-        self.classifier = nn.Conv2d(64, num_classes, kernel_size=1)
+        self.classifier = nn.Conv2d(channels[0], num_classes, kernel_size=1)
     
     def forward(self, X):
         skip_connections = []
@@ -45,27 +47,31 @@ class UNet(nn.Module):
 
 class AttentionUNet(nn.Module):
     """The UNet Architecture for Medical Image Segmentation."""
-    def __init__(self, in_channels, num_classes=5):
+    def __init__(self, in_channels, num_classes=5, depth=5):
+        if depth <= 2:
+            raise ValueError("depth must be greater than 2")
         super().__init__()
-        self.downsample_convs = nn.ModuleList([
-            UNetDownsampleConvBlock(in_channels, 64),
-            UNetDownsampleConvBlock(64, 128),
-            UNetDownsampleConvBlock(128, 256),
-            UNetDownsampleConvBlock(256, 512),
-        ])
+        channels = [64 * (2 ** i) for i in range(depth)]
+        
+        down_convs = [UNetDownsampleConvBlock(in_channels, channels[0])]
+        for i in range(1, depth - 1):
+            down_convs.append(UNetDownsampleConvBlock(channels[i-1], channels[i]))
+        self.downsample_convs = nn.ModuleList(down_convs)
+        
         self.downsampler = nn.MaxPool2d(kernel_size=2, stride=2)
-        self.final_downsample = UNetDownsampleConvBlock(512, 1024)
+        self.final_downsample = UNetDownsampleConvBlock(channels[depth-2], channels[depth-1])
+        
         self.upsamplers = nn.ModuleList([
             AttentionUnetDecoderBlock(
-                1024, 512, 256, 512, num_maps=num_classes),
-            AttentionUnetDecoderBlock(
-                512, 256, 128, 256, num_maps=num_classes),
-            AttentionUnetDecoderBlock(
-                256, 128, 64, 128, num_maps=num_classes),
-            AttentionUnetDecoderBlock(
-                128, 64, 32, 64, num_maps=num_classes)
+                gate_channels=channels[i+1],
+                skip_channels=channels[i],
+                attn_channels=(channels[i-1] if i > 0 else channels[0] // 2),
+                out_channels=channels[i],
+                num_maps=num_classes
+            )
+            for i in reversed(range(depth - 1))
         ])
-        self.classifier = nn.Conv2d(64, num_classes, kernel_size=1)
+        self.classifier = nn.Conv2d(channels[0], num_classes, kernel_size=1)
 
     def forward(self, X):
         skip_connections = []
@@ -83,18 +89,21 @@ class AttentionUNet(nn.Module):
 
 class UNetPlusPlus(nn.Module):
     """UNet++ implementation for kvasir segmentation."""
-    def __init__(self, in_channels, num_classes=1, inf_avg=True):
+    def __init__(self, in_channels, num_classes=1, inf_avg=True, depth=5):
+        if depth <= 2:
+            raise ValueError("depth must be greater than 2")
         super().__init__()
-        depth = 5
         self._depth = depth
-        self.downsample_convs = nn.ModuleList([
-            UNetDownsampleConvBlock(in_channels, 64),
-            UNetDownsampleConvBlock(64, 128),
-            UNetDownsampleConvBlock(128, 256),
-            UNetDownsampleConvBlock(256, 512)
-        ])
+        channels = [64 * (2 ** i) for i in range(depth)]
+        
+        down_convs = [UNetDownsampleConvBlock(in_channels, channels[0])]
+        for i in range(1, depth - 1):
+            down_convs.append(UNetDownsampleConvBlock(channels[i-1], channels[i]))
+        self.downsample_convs = nn.ModuleList(down_convs)
+        
         self.downsampler = nn.MaxPool2d(kernel_size=2, stride=2)
-        self.final_downsample = UNetDownsampleConvBlock(512, 1024)
+        self.final_downsample = UNetDownsampleConvBlock(channels[depth-2], channels[depth-1])
+        
         self.skip_nodes = nn.ModuleList([
             nn.ModuleList([
                 UnetPlusPlusSkipNode(level=i, skip_id=j) for j in range(1, depth-i-1)
@@ -102,16 +111,12 @@ class UNetPlusPlus(nn.Module):
             for i in range(depth-2)
         ])
         self.upsample_convs = nn.ModuleList([
-            UNetUpsampleBlock(512 * 2, 512),
-            UNetUpsampleBlock(256 * 3, 256),
-            UNetUpsampleBlock(128 * 4, 128),
-            UNetUpsampleBlock(64 * 5, 64)
+            UNetUpsampleBlock(channels[depth - j - 1] * (j + 1), channels[depth - j - 1])
+            for j in range(1, depth)
         ])
         self.classifiers = nn.ModuleList([
-            nn.Conv2d(64, num_classes, kernel_size=1),
-            nn.Conv2d(64, num_classes, kernel_size=1),
-            nn.Conv2d(64, num_classes, kernel_size=1),
-            nn.Conv2d(64, num_classes, kernel_size=1),
+            nn.Conv2d(channels[0], num_classes, kernel_size=1)
+            for _ in range(depth - 1)
         ])
         self._inference_branch_count = depth
         self.inf_avg = inf_avg

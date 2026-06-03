@@ -47,6 +47,8 @@ NUM_WORKERS = 2
 train_transform = v2.Compose(
     [
         v2.Resize(IMAGE_SIZE, antialias=True),
+        v2.RandomHorizontalFlip(p=0.5),
+        v2.RandomVerticalFlip(p=0.5),
         v2.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
         v2.ToDtype(torch.float32, scale=True),
     ]

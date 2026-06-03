@@ -10,9 +10,10 @@ class DiceLoss(nn.Module):
         y_pred = torch.sigmoid(y_pred)
         if y.ndim != 4:
             y = y.unsqueeze(dim=1)
-        intersection = (y_pred * y).sum()
-        union = y_pred.sum() + y.sum()
-        dice = 2 * intersection / (union + 1e-6)
+        intersection = (y_pred * y)
+        union = y_pred + y
+        dice = 2 * (intersection + 1e-6) / (union + 1e-6)
+        dice = dice.mean()
         return 1 - dice
 
 
