@@ -31,6 +31,7 @@ from ignite.metrics import (
 
 from seg_modules.data import Kvasir1Dataset
 from seg_modules.unet import UNet, AttentionUNet, UNetPlusPlus
+from seg_modules.losses import DiceLoss, CombinedLoss
 from seg_modules.training import (
     UNetTrainerProcess,
     UNetEvaluatorProcess,
@@ -55,6 +56,12 @@ model_catalog = {
     "unet": UNet,
     "attention_unet": AttentionUNet,
     "unet_plus_plus": UNetPlusPlus,
+}
+
+loss_catalog = {
+    "bce": nn.BCEWithLogitsLoss,
+    "dice": DiceLoss,
+    "combined": CombinedLoss,
 }
 
 train_process_catalog = {
@@ -167,7 +174,16 @@ def start_training(local_rank, config):
     model = get_model(config["model_name"], num_classes=1)
     model = idist.auto_model(model)
 
-    loss_fn = nn.BCEWithLogitsLoss()
+    loss_name = config.get("loss", "bce").lower()
+    loss_class = loss_catalog.get(loss_name)
+    if loss_class is None:
+        raise ValueError(f"Loss {loss_name} not found in catalog.")
+
+    if loss_class == CombinedLoss:
+        loss_fn = loss_class(alpha=config.get("loss_alpha", 0.5))
+    else:
+        loss_fn = loss_class()
+
     optimizer = torch.optim.Adam(model.parameters(), lr=config["learning_rate"])
     optimizer = idist.auto_optim(optimizer)
     grad_scaler = GradScaler(enabled=device.type == "cuda" and config["use_amp"])
@@ -280,6 +296,19 @@ def main():
     )
     parser.add_argument(
         "--checkpoint_path", type=str, default=None, help="Path to a checkpoint to load"
+    )
+    parser.add_argument(
+        "--loss",
+        type=str,
+        default="bce",
+        choices=["bce", "dice", "combined"],
+        help="Loss function to use (choices: bce, dice, combined)",
+    )
+    parser.add_argument(
+        "--loss_alpha",
+        type=float,
+        default=0.5,
+        help="Alpha weight for CombinedLoss (bce * alpha + dice * (1 - alpha))",
     )
 
     args = parser.parse_args()

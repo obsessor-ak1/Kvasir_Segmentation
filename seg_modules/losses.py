@@ -7,6 +7,7 @@ class DiceLoss(nn.Module):
         super().__init__()
     
     def forward(self, y_pred, y):
+        y_pred = torch.sigmoid(y_pred)
         if y.ndim != 4:
             y = y.unsqueeze(dim=1)
         intersection = (y_pred * y).sum()
