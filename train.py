@@ -14,12 +14,12 @@ from ignite.engine import Engine, Events
 from ignite.handlers import (
     Checkpoint,
     DiskSaver,
-    LRScheduler,
     global_step_from_engine,
     EarlyStopping,
 )
 from ignite.handlers.tqdm_logger import ProgressBar
 from ignite.handlers.wandb_logger import WandBLogger, OutputHandler
+from ignite.handlers.param_scheduler import ReduceLROnPlateauScheduler
 from ignite.metrics import (
     Accuracy,
     ConfusionMatrix,
@@ -30,11 +30,12 @@ from ignite.metrics import (
 )
 
 from seg_modules.data import Kvasir1Dataset
-from seg_modules.unet import UNet, AttentionUNet, UNetPlusPlus
+from seg_modules.architectures.unet import UNet, AttentionUNet, UNetPlusPlus
+from seg_modules.architectures.segformer import SegFormer
 from seg_modules.losses import DiceLoss, CombinedLoss
 from seg_modules.training import (
-    UNetTrainerProcess,
-    UNetEvaluatorProcess,
+    SegmentationTrainerProcess,
+    SegmentationEvaluatorProcess,
     UNetPlusPlusTrainerProcess,
     train_output_transform,
     val_output_transform,
@@ -58,6 +59,7 @@ model_catalog = {
     "unet": UNet,
     "attention_unet": AttentionUNet,
     "unet_plus_plus": UNetPlusPlus,
+    "segformer": SegFormer,
 }
 
 loss_catalog = {
@@ -67,15 +69,17 @@ loss_catalog = {
 }
 
 train_process_catalog = {
-    "unet": UNetTrainerProcess,
-    "attention_unet": UNetTrainerProcess,
+    "unet": SegmentationTrainerProcess,
+    "attention_unet": SegmentationTrainerProcess,
     "unet_plus_plus": UNetPlusPlusTrainerProcess,
+    "segformer": SegmentationTrainerProcess,
 }
 
 eval_process_catalog = {
-    "unet": UNetEvaluatorProcess,
-    "attention_unet": UNetEvaluatorProcess,
-    "unet_plus_plus": UNetEvaluatorProcess,
+    "unet": SegmentationEvaluatorProcess,
+    "attention_unet": SegmentationEvaluatorProcess,
+    "unet_plus_plus": SegmentationEvaluatorProcess,
+    "segformer": SegmentationEvaluatorProcess,
 }
 
 val_transform = v2.Compose(
@@ -85,28 +89,39 @@ val_transform = v2.Compose(
 train_bar = ProgressBar(persist=False, desc="Training")
 val_bar = ProgressBar(persist=False, desc="Validation")
 
+
 def get_distributed_config():
     if not torch.cuda.is_available():
         print("Detected NO GPU. Running in CPU-only mode. 🐢")
         return None, 1
-    num_gpus = torch.cuda.device_count()    
+    num_gpus = torch.cuda.device_count()
     if num_gpus == 1:
-        print(f"Detected 1 GPU: {torch.cuda.get_device_name(0)}. Running in single-process mode. 🚀")
+        print(
+            f"Detected 1 GPU: {torch.cuda.get_device_name(0)}. Running in single-process mode. 🚀"
+        )
         return None, None
-        
+
     if sys.platform == "win32":
         print(f"Detected Windows with {num_gpus} GPUs. Forcing 'gloo' backend. 🚀🚀")
         return "gloo", num_gpus
-        
+
     print(f"Detected Linux with {num_gpus} GPUs. Using optimal 'nccl' backend. 🚀🚀")
     return "nccl", num_gpus
 
 
-def get_model(name="unet", num_classes=1):
+def get_model(name="unet", num_classes=1, depth=5, segformer_type="b0"):
     model = model_catalog.get(name)
     if model is None:
         raise ValueError(f"Model {name} not found in catalog.")
-    return model(in_channels=3, num_classes=num_classes)
+    if name == "segformer":
+        return model(
+            model_name=segformer_type,
+            input_dim=3,
+            num_classes=num_classes,
+            target_h=IMAGE_SIZE[0],
+            target_w=IMAGE_SIZE[1],
+        )
+    return model(in_channels=3, num_classes=num_classes, depth=depth)
 
 
 def get_dataloaders(path, batch_size=BATCH_SIZE, num_workers=NUM_WORKERS):
@@ -173,7 +188,12 @@ def attach_wandb_logger(trainer, evaluator, config):
 
 def start_training(local_rank, config):
     device = idist.device()
-    model = get_model(config["model_name"], num_classes=1)
+    model = get_model(
+        config["model_name"],
+        num_classes=1,
+        depth=config.get("depth", 5),
+        segformer_type=config.get("segformer_type", "b0"),
+    )
     model = idist.auto_model(model)
 
     loss_name = config.get("loss", "bce").lower()
@@ -189,7 +209,11 @@ def start_training(local_rank, config):
     optimizer = torch.optim.Adam(model.parameters(), lr=config["learning_rate"])
     optimizer = idist.auto_optim(optimizer)
     grad_scaler = GradScaler(enabled=device.type == "cuda" and config["use_amp"])
-    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=15, gamma=0.1)
+    scheduler = ReduceLROnPlateauScheduler(
+        optimizer,
+        metric_name="loss",
+        patience=10,
+    )
     train_loader, val_loader = get_dataloaders(
         config["data_path"], config["batch_size"], config["num_workers"]
     )
@@ -199,12 +223,8 @@ def start_training(local_rank, config):
     evaluator_class = eval_process_catalog[config["model_name"]]
 
     # Creating the metrics
-    cm_train = ConfusionMatrix(
-        num_classes=2, output_transform=train_output_transform
-    )
-    cm_val = ConfusionMatrix(
-        num_classes=2, output_transform=val_output_transform
-    )
+    cm_train = ConfusionMatrix(num_classes=2, output_transform=train_output_transform)
+    cm_val = ConfusionMatrix(num_classes=2, output_transform=val_output_transform)
     train_metrics = {
         "loss": RunningAverage(output_transform=lambda output: output[0]),
         "accuracy": Accuracy(output_transform=train_output_transform),
@@ -213,7 +233,13 @@ def start_training(local_rank, config):
         "dice": DiceCoefficient(cm_train),
     }
     val_metrics = {
-        "loss": Loss(loss_fn, output_transform=lambda output: (output[0].view(output[1].shape), output[1].float())),
+        "loss": Loss(
+            loss_fn,
+            output_transform=lambda output: (
+                output[0].view(output[1].shape),
+                output[1].float(),
+            ),
+        ),
         "accuracy": Accuracy(output_transform=val_output_transform),
         "confusion_matrix": cm_val,
         "mIoU": mIoU(cm_val),
@@ -230,8 +256,6 @@ def start_training(local_rank, config):
         metric.attach(trainer, name)
     for name, metric in val_metrics.items():
         metric.attach(evaluator, name)
-    schedule_handler = LRScheduler(scheduler)
-    trainer.add_event_handler(Events.EPOCH_STARTED, schedule_handler)
     # Creating and loading checkpoints
     to_track = {
         "model": model,
@@ -244,7 +268,7 @@ def start_training(local_rank, config):
         Checkpoint.load_objects(to_load=to_track, filename=config["checkpoint_path"])
 
     checkpoint_handler = Checkpoint(
-        to_save=to_track, 
+        to_save=to_track,
         save_handler=DiskSaver("./checkpoints", create_dir=True, require_empty=False),
         score_function=lambda engine: engine.state.metrics["dice"][1].item(),
         score_name="dice",
@@ -255,20 +279,19 @@ def start_training(local_rank, config):
     # Adding early stopping criteria
     stopping_handler = EarlyStopping(
         mode="max",
-        patience=5,
+        patience=15,
         score_function=lambda engine: engine.state.metrics["dice"][1].item(),
         trainer=trainer,
     )
     evaluator.add_event_handler(Events.EPOCH_COMPLETED, stopping_handler)
+    evaluator.add_event_handler(Events.EPOCH_COMPLETED, scheduler)
     trainer.add_event_handler(
         Events.EPOCH_COMPLETED, lambda _: evaluator.run(val_loader)
     )
     if idist.get_rank() == 0:
         train_bar.attach(trainer, metric_names=["loss"])
         val_bar.attach(evaluator)
-        trainer.add_event_handler(
-            Events.EPOCH_COMPLETED, log_trainer_metrics
-        )
+        trainer.add_event_handler(Events.EPOCH_COMPLETED, log_trainer_metrics)
         evaluator.add_event_handler(Events.EPOCH_COMPLETED, log_evaluator_metrics)
         attach_wandb_logger(trainer, evaluator, config)
     trainer.run(train_loader, max_epochs=config["num_epochs"])
@@ -285,7 +308,21 @@ def main():
         "learning_rate", type=float, help="Learning rate for the optimizer"
     )
     parser.add_argument(
-        "--model_name", type=str, default="unet", help="Model name to use for training"
+        "--model_name",
+        type=str,
+        default="unet",
+        choices=["unet", "attention_unet", "unet_plus_plus", "segformer"],
+        help="Model name to use for training",
+    )
+    parser.add_argument(
+        "--segformer_type",
+        type=str,
+        default="b0",
+        choices=["b0", "b1", "b2", "b3", "b4", "b5"],
+        help="Type of SegFormer model from b0 to b5 (default: b0)",
+    )
+    parser.add_argument(
+        "--depth", type=int, default=5, help="Depth of the network model (default: 5)"
     )
     parser.add_argument(
         "--use_amp", action="store_true", help="Enable Automatic Mixed Precision"

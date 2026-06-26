@@ -11,8 +11,8 @@ class ProcessFunction(ABC):
         pass
 
 
-class UNetTrainerProcess(ProcessFunction):
-    """Trainer process for UNet model."""
+class SegmentationTrainerProcess(ProcessFunction):
+    """Trainer process for segmentation models."""
     def __init__(
         self, model, optimizer, loss_fn, grad_scaler, device="cuda", use_amp=True
     ):
@@ -42,8 +42,8 @@ class UNetTrainerProcess(ProcessFunction):
         return loss.item(), y_pred.detach(), y.detach()
 
 
-class UNetEvaluatorProcess(ProcessFunction):
-    """Evaluator process for UNet model."""
+class SegmentationEvaluatorProcess(ProcessFunction):
+    """Evaluator process for segmentation models."""
     def __init__(self, model, device="cuda"):
         self.model = model
         self.device = device
@@ -92,3 +92,5 @@ class UNetPlusPlusTrainerProcess(ProcessFunction):
 
         # Detach the final branch's predictions for metric calculations
         return loss.item(), y_preds[-1].detach(), y.detach()
+
+

@@ -6,7 +6,7 @@ import torch
 from torchvision.transforms import v2
 
 from seg_modules.data import Kvasir1Dataset
-from seg_modules.unet import UNet, AttentionUNet, UNetPlusPlus
+from seg_modules.architectures.unet import UNet, AttentionUNet, UNetPlusPlus
 
 IMAGE_SIZE = (256, 256)
 
@@ -21,14 +21,16 @@ val_transform = v2.Compose(
 )
 
 
-def load_model(model_name: str, checkpoint_path: str, device: torch.device) -> torch.nn.Module:
+def load_model(
+    model_name: str, checkpoint_path: str, device: torch.device, depth: int = 5
+) -> torch.nn.Module:
     """Loads a segmentation model by architecture name and checkpoint path."""
     if model_name not in model_catalog:
         raise ValueError(
             f"Model '{model_name}' not recognized. Choose from: {list(model_catalog.keys())}"
         )
 
-    model = model_catalog[model_name](in_channels=3, num_classes=1)
+    model = model_catalog[model_name](in_channels=3, num_classes=1, depth=depth)
 
     print(f"Loading checkpoint from: {checkpoint_path}")
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
@@ -84,7 +86,9 @@ def get_random_samples(dataset_path: str, count: int, seed: int = None):
     return images_batch, masks_batch, indices
 
 
-def predict(model, images: torch.Tensor, device, threshold: float = 0.5) -> torch.Tensor:
+def predict(
+    model, images: torch.Tensor, device, threshold: float = 0.5
+) -> torch.Tensor:
     """Predicts masks for a batch of images using the specified model and threshold."""
     if images.ndim == 3:
         images = images.unsqueeze(0)
@@ -147,21 +151,33 @@ def main():
         choices=["unet", "attention_unet", "unet_plus_plus"],
         help="The name of the model architecture to load.",
     )
-    parser.add_argument("checkpoint_path", type=str, help="The path to the model checkpoint file.")
-    parser.add_argument("dataset_path", type=str, help="The path to the dataset directory.")
-    parser.add_argument("count", type=int, help="The number of random images to process.")
+    parser.add_argument(
+        "checkpoint_path", type=str, help="The path to the model checkpoint file."
+    )
+    parser.add_argument(
+        "dataset_path", type=str, help="The path to the dataset directory."
+    )
+    parser.add_argument(
+        "count", type=int, help="The number of random images to process."
+    )
     parser.add_argument(
         "--seed",
         type=int,
         default=None,
         help="Optional seed for random number generators to ensure reproducibility.",
     )
+    parser.add_argument(
+        "--depth",
+        type=int,
+        default=5,
+        help="Depth of the network model (default: 5)",
+    )
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
-    model = load_model(args.model_name, args.checkpoint_path, device)
+    model = load_model(args.model_name, args.checkpoint_path, device, depth=args.depth)
 
     images_batch, masks_batch, indices = get_random_samples(
         args.dataset_path, args.count, seed=args.seed
