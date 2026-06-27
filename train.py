@@ -206,7 +206,9 @@ def start_training(local_rank, config):
     else:
         loss_fn = loss_class()
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=config["learning_rate"])
+    optimizer = torch.optim.AdamW(
+        model.parameters(), lr=config["learning_rate"], weight_decay=1e-2
+    )
     optimizer = idist.auto_optim(optimizer)
     grad_scaler = GradScaler(enabled=device.type == "cuda" and config["use_amp"])
     scheduler = ReduceLROnPlateauScheduler(
